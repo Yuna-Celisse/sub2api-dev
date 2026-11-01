@@ -1,0 +1,12 @@
+[Unit]
+Description=Update Sub2API development image with cold database backup and rollback
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sub2api
+ExecStart=/usr/bin/python3 -u /opt/sub2api/update.py
+TimeoutStartSec=30min
+UMask=0077
