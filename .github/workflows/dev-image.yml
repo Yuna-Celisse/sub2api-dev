@@ -1,0 +1,109 @@
+name: Daily Sub2API development image
+on:
+  schedule:
+    - cron: '27 19 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/dev-image.yml', 'compose.yaml']
+permissions:
+  contents: write
+  packages: write
+concurrency:
+  group: dev-image
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out deployment tooling
+        uses: actions/checkout@v4
+        with:
+          path: control
+          persist-credentials: false
+      - name: Check out upstream main
+        uses: actions/checkout@v4
+        with:
+          repository: Wei-Shaw/sub2api
+          ref: main
+          path: source
+          persist-credentials: false
+          submodules: recursive
+      - name: Resolve upstream version
+        id: version
+        run: |
+          set -euo pipefail
+          sha=$(git -C source rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sub2api" >> "$GITHUB_OUTPUT"
+          echo "version=dev-$(date -u +%Y%m%d)-${sha:0:12}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build upstream Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: source
+          platforms: linux/amd64
+          load: true
+          tags: |
+            ${{ steps.version.outputs.image }}:dev
+            ${{ steps.version.outputs.image }}:dev-${{ steps.version.outputs.sha }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ steps.version.outputs.sha }}
+            GOPROXY=https://proxy.golang.org,direct
+            GOSUMDB=sum.golang.org
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.version.outputs.sha }}
+            org.opencontainers.image.url=https://github.com/Wei-Shaw/sub2api
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Check standard-mode startup and authentication
+        env:
+          IMAGE: ${{ steps.version.outputs.image }}
+          REVISION: ${{ steps.version.outputs.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          db_password=$(openssl rand -hex 24)
+          redis_password=$(openssl rand -hex 24)
+          admin_password=$(openssl rand -hex 24)
+          echo "::add-mask::$db_password"
+          echo "::add-mask::$redis_password"
+          echo "::add-mask::$admin_password"
+          printf 'SUB2API_IMAGE=%s:dev-%s\nPOSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\nADMIN_EMAIL=ci@example.com\nADMIN_PASSWORD=%s\nJWT_SECRET=%s\nTOTP_ENCRYPTION_KEY=%s\n' "$IMAGE" "$REVISION" "$db_password" "$redis_password" "$admin_password" "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > control/.env
+          trap 'docker compose -f control/compose.yaml logs --tail 30; docker compose -f control/compose.yaml down -v' EXIT
+          docker compose --project-name smoke -f control/compose.yaml up -d --wait --wait-timeout 360
+          curl --fail --silent --show-error http://127.0.0.1:8092/health | jq -e '.status == "ok" or .status == "healthy" or .code == 0' >/dev/null
+          jq -n --arg password "$admin_password" '{email:"ci@example.com",password:$password}' > /tmp/sub2api-login.json
+          curl --fail --silent --show-error -H 'Content-Type: application/json' --data-binary @/tmp/sub2api-login.json http://127.0.0.1:8092/api/v1/auth/login | jq -e '.code == 0 and (.data.access_token | length > 0)' >/dev/null
+      - name: Publish images and verified download bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.version.outputs.image }}
+          REVISION: ${{ steps.version.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:dev-$REVISION"
+          docker push "$IMAGE:dev"
+          mkdir bundle
+          docker save "$IMAGE:dev-$REVISION" | gzip -1 > bundle/sub2api-dev.tar.gz
+          printf '%s\n' "$REVISION" > bundle/revision.txt
+          (cd bundle && sha256sum sub2api-dev.tar.gz revision.txt > SHA256SUMS)
+          release="dev-$REVISION"
+          if gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "$(gh release view "$release" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true ]; then
+              gh release upload "$release" --repo "$GITHUB_REPOSITORY" --clobber bundle/*
+              gh release edit "$release" --repo "$GITHUB_REPOSITORY" --draft=false
+            fi
+          else
+            gh release create "$release" --repo "$GITHUB_REPOSITORY" --target main --draft --prerelease --title "Sub2API dev ${REVISION:0:12}" --notes "Upstream source: https://github.com/Wei-Shaw/sub2api/commit/$REVISION. Standard-mode startup and authentication verified." bundle/*
+            gh release edit "$release" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
+          printf 'Upstream: `%s`\n\nImage: `%s:dev`\n' "$REVISION" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"

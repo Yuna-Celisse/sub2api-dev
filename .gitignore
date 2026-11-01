@@ -1,0 +1,10 @@
+.env
+image.env
+data/
+postgres_data/
+redis_data/
+backups/
+downloads/
+__pycache__/
+*.key
+*-credentials.json

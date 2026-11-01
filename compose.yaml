@@ -1,0 +1,87 @@
+services:
+  sub2api:
+    image: ${SUB2API_IMAGE:?Set SUB2API_IMAGE}
+    container_name: sub2api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AUTO_SETUP: 'true'
+      RUN_MODE: standard
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: '8080'
+      SERVER_MODE: release
+      DATABASE_HOST: postgres
+      DATABASE_PORT: '5432'
+      DATABASE_USER: sub2api
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      DATABASE_DBNAME: sub2api
+      DATABASE_SSLMODE: disable
+      DATABASE_MAX_OPEN_CONNS: '10'
+      DATABASE_MAX_IDLE_CONNS: '2'
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_DB: '0'
+      REDIS_POOL_SIZE: '16'
+      REDIS_MIN_IDLE_CONNS: '2'
+      TZ: Asia/Shanghai
+      GOMEMLIMIT: 384MiB
+      GOGC: '75'
+      LOG_ROTATION_MAX_SIZE_MB: '20'
+      LOG_ROTATION_MAX_BACKUPS: '3'
+      LOG_ROTATION_MAX_AGE_DAYS: '7'
+    ports:
+      - '127.0.0.1:8092:8080'
+    volumes:
+      - ./data:/app/data
+    mem_limit: 640m
+    cpus: 1.5
+    security_opt: ['no-new-privileges:true']
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-T', '5', '-O', '/dev/null', 'http://localhost:8080/health']
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    logging: &logging
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  postgres:
+    image: postgres:18-alpine
+    container_name: sub2api-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sub2api
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: sub2api
+      PGDATA: /var/lib/postgresql/data
+      TZ: Asia/Shanghai
+    command: ['postgres', '-c', 'shared_buffers=64MB', '-c', 'max_connections=30', '-c', 'work_mem=2MB', '-c', 'maintenance_work_mem=32MB', '-c', 'effective_cache_size=192MB']
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    mem_limit: 384m
+    shm_size: 96m
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sub2api -d sub2api']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+  redis:
+    image: redis:8-alpine
+    container_name: sub2api-redis
+    restart: unless-stopped
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD:?Set REDIS_PASSWORD}', '--maxmemory', '48mb', '--maxmemory-policy', 'noeviction', '--appendonly', 'yes', '--appendfsync', 'everysec']
+    volumes:
+      - ./redis_data:/data
+    mem_limit: 128m
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
