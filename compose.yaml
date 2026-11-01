@@ -64,7 +64,7 @@ services:
     mem_limit: 384m
     shm_size: 96m
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U sub2api -d sub2api']
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U sub2api -d sub2api']
       interval: 10s
       timeout: 5s
       retries: 10
