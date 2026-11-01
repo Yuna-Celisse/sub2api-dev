@@ -47,12 +47,12 @@ def main():
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     with request(f'https://api.github.com/repos/{REPO}/releases?per_page=30') as res:
         releases = json.load(res)
-    releases = [r for r in releases if not r['draft'] and re.fullmatch(r'dev-[0-9a-f]{40}', r['tag_name'])]
+    releases = [r for r in releases if not r['draft'] and re.fullmatch(r'dev-[0-9a-f]{40}(?:-[0-9a-f]{12})?', r['tag_name'])]
     if not releases:
         raise RuntimeError('No completed development image release yet')
     release = max(releases, key=lambda r: r['published_at'])
-    revision = release['tag_name'][4:]
-    target = f'{IMAGE}:dev-{revision}'
+    revision = release['tag_name'][4:44]
+    target = f'{IMAGE}:{release["tag_name"]}'
     current_file = BASE / 'image.env'
     current = current_file.read_text() if current_file.exists() else ''
     if current.strip() == f'SUB2API_IMAGE={target}' and healthy():
@@ -130,7 +130,7 @@ def main():
         for old in sorted((BASE / 'backups').glob('sub2api-*'))[:-7]:
             shutil.rmtree(old)
         tags = subprocess.check_output(['docker', 'image', 'ls', IMAGE, '--format', '{{.Tag}}'], text=True).splitlines()
-        tags = [f'{IMAGE}:{tag}' for tag in tags if re.fullmatch(r'dev-[0-9a-f]{40}', tag)]
+        tags = [f'{IMAGE}:{tag}' for tag in tags if re.fullmatch(r'dev-[0-9a-f]{40}(?:-[0-9a-f]{12})?', tag)]
         if len(tags) > 3:
             details = json.loads(subprocess.check_output(['docker', 'image', 'inspect', *tags], text=True))
             keep = {item['Id'] for item in sorted(details, key=lambda x: x['Created'], reverse=True)[:3]}

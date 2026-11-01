@@ -35,9 +35,23 @@ jobs:
         run: |
           set -euo pipefail
           sha=$(git -C source rev-parse HEAD)
+          base=$(tr -d '[:space:]' < source/backend/cmd/server/VERSION)
+          base=${base#v}
+          [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sub2api" >> "$GITHUB_OUTPUT"
-          echo "version=dev-$(date -u +%Y%m%d)-${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "version=$base-dev.$(date -u +%Y%m%d).${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "build_ref=dev-$sha-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+      - name: Mark custom image as source build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('source/Dockerfile')
+          text = path.read_text()
+          old = '-X main.BuildType=release'
+          assert text.count(old) == 1, 'Upstream build metadata changed; review before publishing'
+          path.write_text(text.replace(old, '-X main.BuildType=source'))
+          PY
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -53,6 +67,7 @@ jobs:
           tags: |
             ${{ steps.version.outputs.image }}:dev
             ${{ steps.version.outputs.image }}:dev-${{ steps.version.outputs.sha }}
+            ${{ steps.version.outputs.image }}:${{ steps.version.outputs.build_ref }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             COMMIT=${{ steps.version.outputs.sha }}
@@ -61,6 +76,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.version.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.url=https://github.com/Wei-Shaw/sub2api
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -68,6 +84,7 @@ jobs:
         env:
           IMAGE: ${{ steps.version.outputs.image }}
           REVISION: ${{ steps.version.outputs.sha }}
+          BUILD_REF: ${{ steps.version.outputs.build_ref }}
         run: |
           set -euo pipefail
           umask 077
@@ -77,26 +94,30 @@ jobs:
           echo "::add-mask::$db_password"
           echo "::add-mask::$redis_password"
           echo "::add-mask::$admin_password"
-          printf 'SUB2API_IMAGE=%s:dev-%s\nPOSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\nADMIN_EMAIL=ci@example.com\nADMIN_PASSWORD=%s\nJWT_SECRET=%s\nTOTP_ENCRYPTION_KEY=%s\n' "$IMAGE" "$REVISION" "$db_password" "$redis_password" "$admin_password" "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > control/.env
+          printf 'SUB2API_IMAGE=%s:%s\nPOSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\nADMIN_EMAIL=ci@example.com\nADMIN_PASSWORD=%s\nJWT_SECRET=%s\nTOTP_ENCRYPTION_KEY=%s\n' "$IMAGE" "$BUILD_REF" "$db_password" "$redis_password" "$admin_password" "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > control/.env
           trap 'docker compose --project-name smoke -f control/compose.yaml logs --tail 30; docker compose --project-name smoke -f control/compose.yaml down -v' EXIT
           docker compose --project-name smoke -f control/compose.yaml up -d --wait --wait-timeout 360
           curl --fail --silent --show-error http://127.0.0.1:8092/health | jq -e '.status == "ok" or .status == "healthy" or .code == 0' >/dev/null
           jq -n --arg password "$admin_password" '{email:"ci@example.com",password:$password}' > /tmp/sub2api-login.json
           curl --fail --silent --show-error -H 'Content-Type: application/json' --data-binary @/tmp/sub2api-login.json http://127.0.0.1:8092/api/v1/auth/login | jq -e '.code == 0 and (.data.access_token | length > 0)' >/dev/null
+          version=$(docker image inspect "$IMAGE:$BUILD_REF" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev\. ]]
       - name: Publish images and verified download bundle
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ steps.version.outputs.image }}
           REVISION: ${{ steps.version.outputs.sha }}
+          BUILD_REF: ${{ steps.version.outputs.build_ref }}
         run: |
           set -euo pipefail
           docker push "$IMAGE:dev-$REVISION"
+          docker push "$IMAGE:$BUILD_REF"
           docker push "$IMAGE:dev"
           mkdir bundle
-          docker save "$IMAGE:dev-$REVISION" | gzip -1 > bundle/sub2api-dev.tar.gz
+          docker save "$IMAGE:$BUILD_REF" | gzip -1 > bundle/sub2api-dev.tar.gz
           printf '%s\n' "$REVISION" > bundle/revision.txt
           (cd bundle && sha256sum sub2api-dev.tar.gz revision.txt > SHA256SUMS)
-          release="dev-$REVISION"
+          release="$BUILD_REF"
           if gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             if [ "$(gh release view "$release" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true ]; then
               gh release upload "$release" --repo "$GITHUB_REPOSITORY" --clobber bundle/*
