@@ -78,7 +78,7 @@ jobs:
           echo "::add-mask::$redis_password"
           echo "::add-mask::$admin_password"
           printf 'SUB2API_IMAGE=%s:dev-%s\nPOSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\nADMIN_EMAIL=ci@example.com\nADMIN_PASSWORD=%s\nJWT_SECRET=%s\nTOTP_ENCRYPTION_KEY=%s\n' "$IMAGE" "$REVISION" "$db_password" "$redis_password" "$admin_password" "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > control/.env
-          trap 'docker compose -f control/compose.yaml logs --tail 30; docker compose -f control/compose.yaml down -v' EXIT
+          trap 'docker compose --project-name smoke -f control/compose.yaml logs --tail 30; docker compose --project-name smoke -f control/compose.yaml down -v' EXIT
           docker compose --project-name smoke -f control/compose.yaml up -d --wait --wait-timeout 360
           curl --fail --silent --show-error http://127.0.0.1:8092/health | jq -e '.status == "ok" or .status == "healthy" or .code == 0' >/dev/null
           jq -n --arg password "$admin_password" '{email:"ci@example.com",password:$password}' > /tmp/sub2api-login.json
